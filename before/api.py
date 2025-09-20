@@ -221,50 +221,100 @@ class API:
                 pass
         self.temp_files = []
 
+    def _parse_input_item(self, item):
+        if not isinstance(item, str):
+            return item
+            
+        try:
+            if item.startswith(('{', '[')):
+                return self.parse_json_data(item)
+            elif item.startswith('<'):
+                return self.parse_xml_data(item)
+            else:
+                self.log_activity("PARSE_SKIP", f"Skipping invalid input format")
+                return None
+        except Exception as e:
+            self.log_activity("PARSE_ERROR", str(e))
+            return None
+
+    def _process_parsed_data(self, parsed_items):
+        processed_items = []
+        for item in parsed_items:
+            if item:
+                try:
+                    processed = self.process_user_data(item)
+                    processed_items.append(processed)
+                except Exception as e:
+                    self.log_activity("PROCESS_ERROR", f"Error processing item: {str(e)}")
+        return processed_items
+
+    def _save_processed_data(self, processed_data, output_file, backup):
+        success = True
+        
+        try:
+            if not self.save_to_database(processed_data):
+                self.log_activity("DB_ERROR", "Failed to save to database")
+                success = False
+        except Exception as e:
+            self.log_activity("DB_ERROR", str(e))
+            success = False
+
+        if output_file:
+            try:
+                if not self.save_to_file(output_file, processed_data):
+                    self.log_activity("FILE_ERROR", f"Failed to save to {output_file}")
+                    success = False
+            except Exception as e:
+                self.log_activity("FILE_ERROR", str(e))
+                success = False
+
+        if backup:
+            try:
+                if not self.backup_data(processed_data):
+                    self.log_activity("BACKUP_ERROR", "Failed to backup data")
+                    success = False
+            except Exception as e:
+                self.log_activity("BACKUP_ERROR", str(e))
+                success = False
+
+        return success
+
     def process_everything(self, input_data, output_file=None, backup=True):
         self.log_activity("PROCESS_START", "Starting data processing")
 
-        all_data = []
+        try:
+            parsed_items = [self._parse_input_item(item) for item in input_data]
+            parsed_items = [item for item in parsed_items if item is not None]
 
-        for item in input_data:
-            if isinstance(item, str):
-                if item.startswith('{') or item.startswith('['):
-                    parsed = self.parse_json_data(item)
-                elif item.startswith('<'):
-                    parsed = self.parse_xml_data(item)
-                else:
-                    continue
-            else:
-                parsed = item
+            if not parsed_items:
+                self.log_activity("PROCESS_ERROR", "No valid data to process")
+                return {'success': False, 'processed_count': 0, 'errors': self.errors}
 
-            if parsed:
-                processed = self.process_user_data(parsed)
-                all_data.append(processed)
+            processed_data = self._process_parsed_data(parsed_items)
+            
+            if not processed_data:
+                self.log_activity("PROCESS_ERROR", "No data successfully processed")
+                return {'success': False, 'processed_count': 0, 'errors': self.errors}
 
-        if all_data:
-            self.save_to_database(all_data)
+            save_success = self._save_processed_data(processed_data, output_file, backup)
 
-            if output_file:
-                self.save_to_file(output_file, all_data)
-
-            if backup:
-                self.backup_data(all_data)
-
-            report = self.generate_report(all_data)
-            self.log_activity("PROCESS_COMPLETE", f"Processed {len(all_data)} records")
+            report = self.generate_report(processed_data)
+            self.log_activity("PROCESS_COMPLETE", f"Processed {len(processed_data)} records")
 
             return {
-                'success': True,
-                'processed_count': len(all_data),
+                'success': save_success,
+                'processed_count': len(processed_data),
                 'report': report,
                 'errors': self.errors
             }
 
-        return {
-            'success': False,
-            'processed_count': 0,
-            'errors': self.errors
-        }
+        except Exception as e:
+            self.log_activity("CRITICAL_ERROR", str(e))
+            return {
+                'success': False,
+                'processed_count': 0,
+                'errors': self.errors + [str(e)]
+            }
 
     def __del__(self):
         try:
