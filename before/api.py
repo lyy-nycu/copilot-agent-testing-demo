@@ -11,15 +11,25 @@ import logging
 
 class API:
     def __init__(self):
-        self.ldap_server = "ldap://192.168.1.100:389"
-        self.ldap_user = "admin"
-        self.ldap_password = "Password123!"
-        self.sql_server = "DRIVER={ODBC Driver 17 for SQL Server};SERVER=192.168.1.200;DATABASE=ProductionDB;UID=sa;PWD=SqlAdmin2023!"
-        self.api_key = "key-1234567890abcdef"
-        self.secret_key = "supersecretkey123456"
-        self.encryption_key = "MyHardcodedEncryptionKey2023"
-        self.admin_password = "admin123"
-        self.backup_urls = ["http://backup1.internal.com", "http://backup2.internal.com"]
+        self.ldap_server = os.getenv("LDAP_SERVER", "ldap://localhost:389")
+        self.ldap_user = os.getenv("LDAP_USER", "admin")
+        self.ldap_password = os.getenv("LDAP_PASSWORD")
+
+        sql_server = os.getenv("SQL_SERVER", "localhost")
+        sql_database = os.getenv("SQL_DATABASE", "AppDB")
+        sql_user = os.getenv("SQL_USER", "app_user")
+        sql_password = os.getenv("SQL_PASSWORD")
+        self.sql_server = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={sql_server};DATABASE={sql_database};UID={sql_user};PWD={sql_password};"
+
+        self.api_key = os.getenv("API_KEY")
+        self.secret_key = os.getenv("SECRET_KEY")
+        self.encryption_key = os.getenv("ENCRYPTION_KEY")
+        self.admin_password = os.getenv("ADMIN_PASSWORD")
+
+        backup_urls_env = os.getenv("BACKUP_URLS", "")
+        self.backup_urls = backup_urls_env.split(",") if backup_urls_env else []
+
+        self._validate_required_credentials()
         self.connection = None
         self.ldap_conn = None
         self.data = []
@@ -30,6 +40,29 @@ class API:
         self.cached_results = {}
         self.config = {}
         self.temp_files = []
+
+    def _validate_required_credentials(self):
+        required_vars = [
+            "LDAP_PASSWORD",
+            "SQL_PASSWORD",
+            "API_KEY",
+            "SECRET_KEY",
+            "ENCRYPTION_KEY",
+            "ADMIN_PASSWORD"
+        ]
+
+        missing_vars = []
+        for var in required_vars:
+            if not os.getenv(var):
+                missing_vars.append(var)
+
+        if missing_vars:
+            raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+
+    def _log_config_status(self):
+        self.log_activity("CONFIG_LOADED", f"Configuration loaded from environment variables")
+        if not self.backup_urls:
+            self.log_activity("CONFIG_WARNING", "No backup URLs configured")
 
     def connect_ldap(self):
         try:
@@ -143,14 +176,20 @@ class API:
 
         try:
             cursor = self.connection.cursor()
+            query = """
+            INSERT INTO users (id, name, email, phone, created_date, email_valid, phone_valid)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """
             for record in data:
-                query = f"""
-                INSERT INTO users (id, name, email, phone, created_date, email_valid, phone_valid)
-                VALUES ('{record['id']}', '{record['name']}', '{record['email']}',
-                        '{record['phone']}', '{record['created_date']}',
-                        {record['email_valid']}, {record['phone_valid']})
-                """
-                cursor.execute(query)
+                cursor.execute(query, (
+                    record['id'],
+                    record['name'],
+                    record['email'],
+                    record['phone'],
+                    record['created_date'],
+                    record['email_valid'],
+                    record['phone_valid']
+                ))
             self.connection.commit()
             return True
         except Exception as e:
@@ -221,50 +260,68 @@ class API:
                 pass
         self.temp_files = []
 
-    def process_everything(self, input_data, output_file=None, backup=True):
-        self.log_activity("PROCESS_START", "Starting data processing")
+    def _parse_input_item(self, item):
+        if isinstance(item, str):
+            if item.startswith('{') or item.startswith('['):
+                return self.parse_json_data(item)
+            elif item.startswith('<'):
+                return self.parse_xml_data(item)
+            return None
+        return item
 
-        all_data = []
-
+    def _parse_all_input(self, input_data):
+        parsed_items = []
         for item in input_data:
-            if isinstance(item, str):
-                if item.startswith('{') or item.startswith('['):
-                    parsed = self.parse_json_data(item)
-                elif item.startswith('<'):
-                    parsed = self.parse_xml_data(item)
-                else:
-                    continue
-            else:
-                parsed = item
-
+            parsed = self._parse_input_item(item)
             if parsed:
-                processed = self.process_user_data(parsed)
-                all_data.append(processed)
+                parsed_items.append(parsed)
+        return parsed_items
 
-        if all_data:
-            self.save_to_database(all_data)
+    def _process_all_data(self, parsed_data):
+        processed_data = []
+        for item in parsed_data:
+            processed = self.process_user_data(item)
+            processed_data.append(processed)
+        return processed_data
 
-            if output_file:
-                self.save_to_file(output_file, all_data)
+    def _persist_data(self, data, output_file, backup):
+        self.save_to_database(data)
 
-            if backup:
-                self.backup_data(all_data)
+        if output_file:
+            self.save_to_file(output_file, data)
 
-            report = self.generate_report(all_data)
-            self.log_activity("PROCESS_COMPLETE", f"Processed {len(all_data)} records")
+        if backup:
+            self.backup_data(data)
 
-            return {
-                'success': True,
-                'processed_count': len(all_data),
-                'report': report,
-                'errors': self.errors
-            }
+    def _create_success_response(self, data):
+        report = self.generate_report(data)
+        self.log_activity("PROCESS_COMPLETE", f"Processed {len(data)} records")
 
+        return {
+            'success': True,
+            'processed_count': len(data),
+            'report': report,
+            'errors': self.errors
+        }
+
+    def _create_failure_response(self):
         return {
             'success': False,
             'processed_count': 0,
             'errors': self.errors
         }
+
+    def process_everything(self, input_data, output_file=None, backup=True):
+        self.log_activity("PROCESS_START", "Starting data processing")
+
+        parsed_data = self._parse_all_input(input_data)
+        if not parsed_data:
+            return self._create_failure_response()
+
+        processed_data = self._process_all_data(parsed_data)
+        self._persist_data(processed_data, output_file, backup)
+
+        return self._create_success_response(processed_data)
 
     def __del__(self):
         try:
