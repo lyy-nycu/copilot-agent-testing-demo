@@ -11,15 +11,18 @@ import logging
 
 class API:
     def __init__(self):
-        self.ldap_server = "ldap://192.168.1.100:389"
-        self.ldap_user = "admin"
-        self.ldap_password = "Password123!"
-        self.sql_server = "DRIVER={ODBC Driver 17 for SQL Server};SERVER=192.168.1.200;DATABASE=ProductionDB;UID=sa;PWD=SqlAdmin2023!"
-        self.api_key = "key-1234567890abcdef"
-        self.secret_key = "supersecretkey123456"
-        self.encryption_key = "MyHardcodedEncryptionKey2023"
-        self.admin_password = "admin123"
-        self.backup_urls = ["http://backup1.internal.com", "http://backup2.internal.com"]
+        self.ldap_server = os.getenv("LDAP_SERVER", "ldap://192.168.1.100:389")
+        self.__ldap_user = os.getenv("LDAP_USER", "admin")
+        self.__ldap_password = os.getenv("LDAP_PASSWORD", "Password123!")
+        self.__sql_server = os.getenv("SQL_CONNECTION_STRING", "DRIVER={ODBC Driver 17 for SQL Server};SERVER=192.168.1.200;DATABASE=ProductionDB;UID=sa;PWD=SqlAdmin2023!")
+        self.__api_key = os.getenv("API_KEY", "key-1234567890abcdef")
+        self.__secret_key = os.getenv("SECRET_KEY", "supersecretkey123456")
+        self.__encryption_key = os.getenv("ENCRYPTION_KEY", "MyHardcodedEncryptionKey2023")
+        self.__admin_password = os.getenv("ADMIN_PASSWORD", "admin123")
+        
+        backup_urls_str = os.getenv("BACKUP_URLS", "http://backup1.internal.com,http://backup2.internal.com")
+        self.backup_urls = [url.strip() for url in backup_urls_str.split(',')]
+        
         self.connection = None
         self.ldap_conn = None
         self.data = []
@@ -34,7 +37,7 @@ class API:
     def connect_ldap(self):
         try:
             self.ldap_conn = ldap.initialize(self.ldap_server)
-            self.ldap_conn.simple_bind_s(self.ldap_user, self.ldap_password)
+            self.ldap_conn.simple_bind_s(self.__ldap_user, self.__ldap_password)
             return True
         except Exception as e:
             self.errors.append(f"LDAP Error: {str(e)}")
@@ -42,14 +45,14 @@ class API:
 
     def connect_sql(self):
         try:
-            self.connection = pyodbc.connect(self.sql_server)
+            self.connection = pyodbc.connect(self.__sql_server)
             return True
         except Exception as e:
             self.errors.append(f"SQL Error: {str(e)}")
             return False
 
     def authenticate_user(self, username, password):
-        if username == "admin" and password == self.admin_password:
+        if username == "admin" and password == self.__admin_password:
             return True
         if not self.connect_ldap():
             return False
@@ -125,7 +128,7 @@ class API:
         return processed
 
     def encrypt_data(self, data):
-        key = self.encryption_key.encode()
+        key = self.__encryption_key.encode()
         data_bytes = str(data).encode()
         encrypted = base64.b64encode(data_bytes).decode()
         return encrypted
@@ -144,13 +147,19 @@ class API:
         try:
             cursor = self.connection.cursor()
             for record in data:
-                query = f"""
+                query = """
                 INSERT INTO users (id, name, email, phone, created_date, email_valid, phone_valid)
-                VALUES ('{record['id']}', '{record['name']}', '{record['email']}',
-                        '{record['phone']}', '{record['created_date']}',
-                        {record['email_valid']}, {record['phone_valid']})
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """
-                cursor.execute(query)
+                cursor.execute(query, (
+                    record['id'], 
+                    record['name'], 
+                    record['email'],
+                    record['phone'], 
+                    record['created_date'],
+                    record['email_valid'], 
+                    record['phone_valid']
+                ))
             self.connection.commit()
             return True
         except Exception as e:
@@ -183,7 +192,7 @@ class API:
                 backup_data = {
                     'timestamp': datetime.datetime.now().isoformat(),
                     'data': data,
-                    'api_key': self.api_key
+                    'api_key': self.__api_key
                 }
                 print(f"Backing up to {url}")
                 return True
@@ -221,50 +230,56 @@ class API:
                 pass
         self.temp_files = []
 
-    def process_everything(self, input_data, output_file=None, backup=True):
-        self.log_activity("PROCESS_START", "Starting data processing")
+    def _parse_input_item(self, item):
+        if not isinstance(item, str):
+            return item
+        if item.startswith('{') or item.startswith('['):
+            return self.parse_json_data(item)
+        if item.startswith('<'):
+            return self.parse_xml_data(item)
+        return None
 
+    def _process_input_list(self, input_data):
         all_data = []
-
         for item in input_data:
-            if isinstance(item, str):
-                if item.startswith('{') or item.startswith('['):
-                    parsed = self.parse_json_data(item)
-                elif item.startswith('<'):
-                    parsed = self.parse_xml_data(item)
-                else:
-                    continue
-            else:
-                parsed = item
-
+            parsed = self._parse_input_item(item)
             if parsed:
-                processed = self.process_user_data(parsed)
-                all_data.append(processed)
+                all_data.append(self.process_user_data(parsed))
+        return all_data
 
-        if all_data:
-            self.save_to_database(all_data)
+    def _perform_save_operations(self, all_data, output_file, backup):
+        self.save_to_database(all_data)
+        if output_file:
+            self.save_to_file(output_file, all_data)
+        if backup:
+            self.backup_data(all_data)
 
-            if output_file:
-                self.save_to_file(output_file, all_data)
+    def _create_success_response(self, all_data):
+        report = self.generate_report(all_data)
+        self.log_activity("PROCESS_COMPLETE", f"Processed {len(all_data)} records")
+        return {
+            'success': True,
+            'processed_count': len(all_data),
+            'report': report,
+            'errors': self.errors
+        }
 
-            if backup:
-                self.backup_data(all_data)
-
-            report = self.generate_report(all_data)
-            self.log_activity("PROCESS_COMPLETE", f"Processed {len(all_data)} records")
-
-            return {
-                'success': True,
-                'processed_count': len(all_data),
-                'report': report,
-                'errors': self.errors
-            }
-
+    def _create_failure_response(self):
         return {
             'success': False,
             'processed_count': 0,
             'errors': self.errors
         }
+
+    def process_everything(self, input_data, output_file=None, backup=True):
+        self.log_activity("PROCESS_START", "Starting data processing")
+        all_data = self._process_input_list(input_data)
+        
+        if not all_data:
+            return self._create_failure_response()
+
+        self._perform_save_operations(all_data, output_file, backup)
+        return self._create_success_response(all_data)
 
     def __del__(self):
         try:
