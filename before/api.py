@@ -143,14 +143,20 @@ class API:
 
         try:
             cursor = self.connection.cursor()
+            query = """
+            INSERT INTO users (id, name, email, phone, created_date, email_valid, phone_valid)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """
             for record in data:
-                query = f"""
-                INSERT INTO users (id, name, email, phone, created_date, email_valid, phone_valid)
-                VALUES ('{record['id']}', '{record['name']}', '{record['email']}',
-                        '{record['phone']}', '{record['created_date']}',
-                        {record['email_valid']}, {record['phone_valid']})
-                """
-                cursor.execute(query)
+                cursor.execute(query, (
+                    record['id'],
+                    record['name'],
+                    record['email'],
+                    record['phone'],
+                    record['created_date'],
+                    record['email_valid'],
+                    record['phone_valid']
+                ))
             self.connection.commit()
             return True
         except Exception as e:
